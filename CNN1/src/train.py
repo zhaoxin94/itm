@@ -1,8 +1,11 @@
 import os
 import numpy as np
+
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import lr_scheduler
+from torch.cuda.amp import GradScaler,autocast
+
 import matplotlib.pyplot as plt
 from unet import *
 from dataset import *
@@ -21,10 +24,14 @@ if not os.path.exists(picPath):
     os.mkdir(picPath)
 if not os.path.exists(modPath):
     os.mkdir(modPath)
-# DEVICE = torch.device(torch.device('cuda') if torch.cuda.is_available() else 'cpu') # Nvidia GPU
-DEVICE = torch.device(torch.device('mps') if torch.backends.mps.is_available() else 'cpu') # Apple GPU
+DEVICE = torch.device(
+    torch.device('cuda') if torch.cuda.is_available() else 'cpu')  # Nvidia GPU
+# DEVICE = torch.device(torch.device('mps') if torch.backends.mps.is_available() else 'cpu') # Apple GPU
 print(DEVICE)
 
+# zhaoxin add
+scaler = GradScaler()
+use_amp = True
 
 def go():
     load_data()
@@ -32,7 +39,11 @@ def go():
     model = UNet(in_ch=1, out_ch=1).to(DEVICE)
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=2, min_lr=1e-8)
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer,
+                                               mode='min',
+                                               factor=0.2,
+                                               patience=2,
+                                               min_lr=1e-8)
     train_model(model, criterion, optimizer, scheduler, epochs)
 
 
@@ -47,14 +58,25 @@ def load_data():
     validID = allID[trainLength:]
     global trainData
     global validData
-    trainData = DataLoader(DASDataset(imgPath, lblPath, trainID, chann=1, dim=dim), batch_size=batch_size, shuffle=True)
-    validData = DataLoader(DASDataset(imgPath, lblPath, validID, chann=1, dim=dim), batch_size=batch_size, shuffle=False)
+    trainData = DataLoader(DASDataset(imgPath,
+                                      lblPath,
+                                      trainID,
+                                      chann=1,
+                                      dim=dim),
+                           batch_size=batch_size,
+                           shuffle=True)
+    validData = DataLoader(DASDataset(imgPath,
+                                      lblPath,
+                                      validID,
+                                      chann=1,
+                                      dim=dim),
+                           batch_size=batch_size,
+                           shuffle=False)
     print('data loaded')
     return trainID[0], validID[0]
 
 
 def train_model(model, criterion, optimizer, scheduler, epochs):
-
     def plot(title, xlabel, ylabel, picFile, curve1, curve2=None, legend=None):
         plt.figure(figsize=(50, 30))
         plt.title(title, fontsize=48)
@@ -75,7 +97,7 @@ def train_model(model, criterion, optimizer, scheduler, epochs):
     valid_loss = []
     lr_list = []
     print('ready to train')
-    
+
     for epoch in range(epochs):
         # train
         total_train_loss = []
@@ -84,10 +106,18 @@ def train_model(model, criterion, optimizer, scheduler, epochs):
             input = input.to(DEVICE)
             label = label.to(DEVICE)
             optimizer.zero_grad()
-            output = model(input)
-            loss = criterion(output, label)
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                with autocast():
+                    output = model(input)
+                    loss = criterion(output, label)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                output = model(input)
+                loss = criterion(output, label)
+                loss.backward()
+                optimizer.step()
             total_train_loss.append(loss.item())
         running_train_loss = np.mean(total_train_loss)
         running_lr = optimizer.param_groups[0]['lr']
@@ -96,7 +126,11 @@ def train_model(model, criterion, optimizer, scheduler, epochs):
         scheduler.step(running_train_loss)
         if train_loss[-1] < MinTrainLoss:
             file_path = modPath + '/unet_model_min_train.pth'
-            state = {'net':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
+            state = {
+                'net': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch
+            }
             torch.save(state, file_path)
             MinTrainLoss = train_loss[-1]
 
@@ -114,26 +148,45 @@ def train_model(model, criterion, optimizer, scheduler, epochs):
         valid_loss.append(running_valid_loss)
         if valid_loss[-1] < MinValidLoss:
             file_path = modPath + '/unet_model_min_valid.pth'
-            state = {'net':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
+            state = {
+                'net': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch
+            }
             torch.save(state, file_path)
             MinValidLoss = valid_loss[-1]
-        
+
         # print training log
-        print(f'epoch{epoch+1:3d}/{epochs:3d}, train loss = {running_train_loss:6.4f}, valid loss = {running_valid_loss:6.4f}, lr = {running_lr}')
+        print(
+            f'epoch{epoch+1:3d}/{epochs:3d}, train loss = {running_train_loss:6.4f}, valid loss = {running_valid_loss:6.4f}, lr = {running_lr}'
+        )
 
         # save model
-        if (epoch+1)%10 == 0:
-            file_path = modPath + '/unet_model%03d.pth'%(epoch+1)
-            state = {'net':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
+        if (epoch + 1) % 10 == 0:
+            file_path = modPath + '/unet_model%03d.pth' % (epoch + 1)
+            state = {
+                'net': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch
+            }
             torch.save(state, file_path)
-    
+
     # plot
     picFile1 = picPath + 'unet_loss.png'
     picFile2 = picPath + 'unet_learning_rate.png'
-    plot(title='UNet Loss During Training', curve1=train_loss, curve2=valid_loss, xlabel='Epoch', ylabel='Loss', legend=['train', 'valid'], picFile=picFile1)
-    plot(title='UNet Learning Rate During Training', curve1=lr_list, xlabel='Epoch', ylabel='Learning Rate', picFile=picFile2)
+    plot(title='UNet Loss During Training',
+         curve1=train_loss,
+         curve2=valid_loss,
+         xlabel='Epoch',
+         ylabel='Loss',
+         legend=['train', 'valid'],
+         picFile=picFile1)
+    plot(title='UNet Learning Rate During Training',
+         curve1=lr_list,
+         xlabel='Epoch',
+         ylabel='Learning Rate',
+         picFile=picFile2)
     print('training finished')
-
 
 
 if __name__ == '__main__':

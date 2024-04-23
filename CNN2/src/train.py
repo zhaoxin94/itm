@@ -1,8 +1,11 @@
 import os
 import numpy as np
+
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import lr_scheduler
+from torch.cuda.amp import GradScaler,autocast
+
 import matplotlib.pyplot as plt
 from unet import *
 from dataset import *
@@ -21,10 +24,13 @@ if not os.path.exists(picPath):
     os.mkdir(picPath)
 if not os.path.exists(modPath):
     os.mkdir(modPath)
-# DEVICE = torch.device(torch.device('cuda') if torch.cuda.is_available() else 'cpu') # Nvidia GPU
-DEVICE = torch.device(torch.device('mps') if torch.backends.mps.is_available() else 'cpu') # Apple GPU
+DEVICE = torch.device(torch.device('cuda') if torch.cuda.is_available() else 'cpu') # Nvidia GPU
+# DEVICE = torch.device(torch.device('mps') if torch.backends.mps.is_available() else 'cpu') # Apple GPU
 print(DEVICE)
 
+# zhaoxin add
+scaler = GradScaler()
+use_amp = True
 
 def go():
     load_data()
@@ -84,10 +90,18 @@ def train_model(model, criterion, optimizer, scheduler, epochs):
             input = input.to(DEVICE)
             label = label.to(DEVICE)
             optimizer.zero_grad()
-            output = model(input)
-            loss = criterion(output, label)
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                with autocast():
+                    output = model(input)
+                    loss = criterion(output, label)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                output = model(input)
+                loss = criterion(output, label)
+                loss.backward()
+                optimizer.step()
             total_train_loss.append(loss.item())
         running_train_loss = np.mean(total_train_loss)
         running_lr = optimizer.param_groups[0]['lr']
